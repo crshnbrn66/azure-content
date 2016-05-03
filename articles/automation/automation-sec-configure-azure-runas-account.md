@@ -80,79 +80,109 @@ The PowerShell script will configure the following:
 1. Save the following script on your computer.  In this example, save it with the filename **New-AzureServicePrincipal.ps1**.  
 
     ```
-    #Requires - RunAsAdministrator
-    Param (
-    [Parameter(Mandatory=$true)]
-    [String] $ResourceGroup,
+            #Requires -RunAsAdministrator
+        Param (
+        [Parameter(Mandatory=$true)]
+        [String] $ResourceGroup,
 
-    [Parameter(Mandatory=$true)]
-    [String] $AutomationAccountName,
+        [Parameter(Mandatory=$true)]
+        [String] $SubscriptionName,
 
-    [Parameter(Mandatory=$true)]
-    [String] $ApplicationDisplayName,
+        [Parameter(Mandatory=$true)]
+        [String] $AutomationAccountName,
 
-    [Parameter(Mandatory=$true)]
-    [String] $CertPlainPassword,
+        [Parameter(Mandatory=$true)]
+        [String] $ApplicationDisplayName,
 
-    [Parameter(Mandatory=$false)]
-    [int] $NoOfMonthsUntilExpired = 12
-    )
+        [Parameter(Mandatory=$true)]
+        [String] $CertPlainPassword,
 
-    Login-AzureRmAccount
-    Import-Module AzureRM.Resources
+        [Parameter(Mandatory=$false)]
+        [int] $NoOfMonthsUntilExpired = 12,
+        [Parameter(Mandatory=$false)]
+        [string]$pathToMakeCert ='C:\Program Files (x86)\Fiddler2\makecert.exe'
+        )
 
-    $CurrentDate = Get-Date
-    $EndDate = $CurrentDate.AddMonths($NoOfMonthsUntilExpired)
-    $KeyId = (New-Guid).Guid
-    $CertPath = Join-Path $env:TEMP ($ApplicationDisplayName + ".pfx")
+        Add-AzureRmAccount -Credential $adm2Credentials
+        Import-Module AzureRM.Resources
 
-    $Cert = New-SelfSignedCertificate -DnsName $ApplicationDisplayName -CertStoreLocation cert:\LocalMachine\My -KeyExportPolicy Exportable -Provider "Microsoft Enhanced RSA and AES Cryptographic Provider"
+        $CurrentDate = (Get-Date).ToUniversalTime()
+        $EndDate = $CurrentDate.AddMonths($NoOfMonthsUntilExpired)
+        $KeyId = (New-Guid).Guid
+        $CertPath = Join-Path $env:TEMP ($ApplicationDisplayName + '.pfx')
+        $cert = Get-ChildItem 'Cert:\LocalMachine\My\' | Where-Object{$_.subject -like "*$ApplicationDisplayName*"}
 
-    $CertPassword = ConvertTo-SecureString $CertPlainPassword -AsPlainText -Force
-    Export-PfxCertificate -Cert ("Cert:\localmachine\my\" + $Cert.Thumbprint) -FilePath $CertPath -Password $CertPassword -Force | Write-Verbose
+        if(!($cert)) #if we've already done this there is no need to create a self signed certificate.
+        {
+            if(get-command New-SelfSignedCertificate -ParameterName 'keyexportPolicy' -ErrorAction SilentlyContinue)
+            {
+                $Cert = New-SelfSignedCertificate -DnsName $ApplicationDisplayName -CertStoreLocation cert:\LocalMachine\My -KeyExportPolicy Exportable -Provider 'Microsoft Enhanced RSA and AES Cryptographic Provider'
+            }
+            else
+            {
+                #& 'C:\Program Files (x86)\Fiddler2\makecert.exe' -sky exchange -r -n "CN=key" -pe -a sha1 -len 2048 -ss My -sv key.pvk key.cer
+                #-pe                 Mark generated private key as exportable
+                # -a   <algorithm>    The signature algorithm
+                #                   <md5|sha1|sha256|sha384|sha512>.  Default to 'sha1'
+                # -ss  <store>        Subject's certificate store name that stores the output certificate
+                #-sr  <location>     Subject's certificate store location.  <CurrentUser|LocalMachine>.  Default to 'CurrentUser'
+                if(Get-Item $pathtomakeCert| Where-Object{$_.name -eq 'makecert.exe'})
+                {
+                    & $pathtoMakeCert -sky exchange -r -n "CN=$ApplicationDisplayName" -pe -a sha1 -len 2048 -ss My -sr LocalMachine #-sv "$CertPath\$applicationDisplayName.pvk" "$CertPath\$applicationDisplayName.cer"
+                    $cert = Get-ChildItem 'Cert:\LocalMachine\My\' | Where-Object{$_.subject -like "*$ApplicationDisplayName*"}
+                    }
+                else
+                {
+                    Throw "Cannot find Makecert.exe Try again: $pathtomakecert"
+                }
+            }
+        }
+        $CertPassword = ConvertTo-SecureString $CertPlainPassword -AsPlainText -Force
+        Export-PfxCertificate -Cert ("Cert:\localmachine\my\$($Cert.Thumbprint)") -FilePath $CertPath -Password $CertPassword -Force | Write-Verbose
 
-    $PFXCert = New-Object -TypeName System.Security.Cryptography.X509Certificates.X509Certificate -ArgumentList @($CertPath, $CertPlainPassword)
-    $KeyValue = [System.Convert]::ToBase64String($PFXCert.GetRawCertData())
+        $PFXCert = New-Object -TypeName System.Security.Cryptography.X509Certificates.X509Certificate -ArgumentList @($CertPath, $CertPlainPassword)
+        $KeyValue = [System.Convert]::ToBase64String($PFXCert.GetRawCertData())
 
-    $KeyCredential = New-Object  Microsoft.Azure.Commands.Resources.Models.ActiveDirectory.PSADKeyCredential
-    $KeyCredential.StartDate = $CurrentDate
-    $KeyCredential.EndDate= $EndDate
-    $KeyCredential.KeyId = $KeyId
-    $KeyCredential.Type = "AsymmetricX509Cert"
-    $KeyCredential.Usage = "Verify"
-    $KeyCredential.Value = $KeyValue
+        $KeyCredential = New-Object  Microsoft.Azure.Commands.Resources.Models.ActiveDirectory.PSADKeyCredential
+        $KeyCredential.StartDate = $CurrentDate
+        $KeyCredential.EndDate= $EndDate
+        $KeyCredential.KeyId = $KeyId
+        $KeyCredential.Type = 'AsymmetricX509Cert'
+        $KeyCredential.Usage = 'Verify'
+        $KeyCredential.Value = $KeyValue
 
-    # Use Key credentials
-    $Application = New-AzureRmADApplication -DisplayName $ApplicationDisplayName -HomePage ("http://" + $ApplicationDisplayName) -IdentifierUris ("http://" + $KeyId) -KeyCredentials $keyCredential
+        # Use Key credentials
+        $Application = New-AzureRmADApplication -DisplayName $ApplicationDisplayName -HomePage ('http://' + $ApplicationDisplayName) -IdentifierUris ('http://' + $KeyId) -KeyCredentials $keyCredential
 
-    New-AzureRMADServicePrincipal -ApplicationId $Application.ApplicationId | Write-Verbose
-    Get-AzureRmADServicePrincipal | Where {$_.ApplicationId -eq $Application.ApplicationId} | Write-Verbose
+        New-AzureRMADServicePrincipal -ApplicationId $Application.ApplicationId | Write-Verbose
+        Get-AzureRmADServicePrincipal | Where-Object {$_.ApplicationId -eq $Application.ApplicationId} | Write-Verbose
 
-    $NewRole = $null
-    $Retries = 0;
-    While ($NewRole -eq $null -and $Retries -le 2)
-    {
-      # Sleep here for a few seconds to allow the service principal application to become active (should only take a couple of seconds normally)
-      Sleep 5
-      New-AzureRMRoleAssignment -RoleDefinitionName Contributor -ServicePrincipalName $Application.ApplicationId | Write-Verbose
-      Sleep 5
-      $NewRole = Get-AzureRMRoleAssignment -ServicePrincipalName $Application.ApplicationId -ErrorAction SilentlyContinue
-      $Retries++;
-    }
+        $NewRole = $null
+        $Retries = 0;
+        While ($NewRole -eq $null -and $Retries -le 2)
+        {
+          # Sleep here for a few seconds to allow the service principal application to become active (should only take a couple of seconds normally)
+          Start-Sleep 5
+          New-AzureRMRoleAssignment -RoleDefinitionName Contributor -ServicePrincipalName $Application.ApplicationId | Write-Verbose
+          Start-Sleep 5
+          $NewRole = Get-AzureRMRoleAssignment -ServicePrincipalName $Application.ApplicationId -ErrorAction SilentlyContinue
+          $Retries++;
+        }
 
-    # Get the tenant id for this subscription
-    $SubscriptionInfo = Get-AzureRmSubscription
-    $TenantID = $SubscriptionInfo | Select TenantId -First 1
+        # Get the tenant id for this subscription
+        $SubscriptionInfo = Get-AzureRmSubscription
+        $TenantID = $SubscriptionInfo | Select-Object TenantId -First 1
 
-    # Create the automation resources
-    New-AzureRmAutomationCertificate -ResourceGroupName $ResourceGroup -AutomationAccountName $AutomationAccountName -Path $CertPath -Name AzureRunAsCertificate -Password $CertPassword -Exportable | write-verbose
+        set-azurermcontext -SubscriptionName $SubscriptionName
+        # Create the automation resources
+        New-AzureRmAutomationCertificate -ResourceGroupName $ResourceGroup -AutomationAccountName $AutomationAccountName -Path $CertPath -Name AzureRunAsCertificate -Password $CertPassword -Exportable | write-verbose
 
-    # Create a Automation connection asset named AzureRunAsConnection in the Automation account. This connection uses the service principal.
-    $ConnectionAssetName = "AzureRunAsConnection"
-    $SubscriptionId = $SubscriptionInfo | Select SubscriptionId -First 1
-    Remove-AzureRmAutomationConnection -ResourceGroupName $ResourceGroup -AutomationAccountName $AutomationAccountName -Name $ConnectionAssetName -Force -ErrorAction SilentlyContinue
-    $ConnectionFieldValues = @{"ApplicationId" = $Application.ApplicationId; "TenantId" = $TenantID.TenantId; "CertificateThumbprint" = $Cert.Thumbprint; "SubscriptionId" = $SubscriptionId.SubscriptionId}
-    New-AzureRmAutomationConnection -ResourceGroupName $ResourceGroup -AutomationAccountName $AutomationAccountName -Name $ConnectionAssetName -ConnectionTypeName AzureServicePrincipal -ConnectionFieldValues $ConnectionFieldValues
+        # Create a Automation connection asset named AzureRunAsConnection in the Automation account. This connection uses the service principal.
+        $ConnectionAssetName = 'AzureRunAsConnection'
+        $SubscriptionId = $SubscriptionInfo | Select-Object SubscriptionId -First 1
+        Remove-AzureRmAutomationConnection -ResourceGroupName $ResourceGroup -AutomationAccountName $AutomationAccountName -Name $ConnectionAssetName -Force -ErrorAction SilentlyContinue
+        $ConnectionFieldValues = @{'ApplicationId' = ( (get-azurermadapplication -DisplayNameStartWith $ApplicationDisplayName).ApplicationId.guid); 'TenantId' = ((get-azurermcontext).Tenant.TenantId); 'CertificateThumbprint' = $Cert.Thumbprint; 'SubscriptionId' = ((get-azurermcontext).Subscription.SubscriptionId)}
+        New-AzureRmAutomationConnection -ResourceGroupName $ResourceGroup -AutomationAccountName $AutomationAccountName -Name $ConnectionAssetName -ConnectionTypeName AzureServicePrincipal -ConnectionFieldValues $ConnectionFieldValues
     ```
 <br>
 2. On your computer, start **Windows PowerShell** from the **Start** screen with elevated user rights.
@@ -162,7 +192,9 @@ The PowerShell script will configure the following:
     .\New-AzureServicePrincipal.ps1 -ResourceGroup <ResourceGroupName> `
      -AutomationAccountName <NameofAutomationAccount> `
      -ApplicationDisplayName <DisplayNameofAutomationAccount> `
-     -CertPlainPassword "<StrongPassword>"
+     -CertPlainPassword "<StrongPassword>" `
+     -SubscriptionName <SubscriptionName>
+     -pathToMakeCert <Location where Makecert.exe is>
     ```   
 <br>
 
